@@ -8,10 +8,45 @@ const rl = readline.createInterface({
   output: process.stdout
 });
 
+// Configuration with multiple accounts
 const config = {
-  userId: 805194544,
-  userLogin: 'login_v2',
-  userSecretKey: 'acf0b652da831a6cc6a83b9e63ecde989c7688edf1eb52bb2c1b66aa12a91205',
+  // Primary account used for WebSocket connection
+  primaryAccount: {
+    userId: 805252744,
+    userLogin: 'login_v2',
+    userSecretKey: 'bd246893bda42b179bf7287482edd1aa93933198c4deb458e98269d83ab572af',
+  },
+  // All accounts that will place bets
+  accounts: [
+    {
+      userId: 805252744,
+      userLogin: 'login_v2',
+      userSecretKey: 'bd246893bda42b179bf7287482edd1aa93933198c4deb458e98269d83ab572af',
+      betHistory: [],
+      lastBetIssueId: null
+    },
+    {
+      userId: 805274136,
+      userLogin: 'login_v2',
+      userSecretKey: '0c231822fa968a051cd9a4571c708b5da065fc6bc435248c96a5a6ba177bc4a6',
+      betHistory: [],
+      lastBetIssueId: null
+    },
+    {
+      userId: 805271139,
+      userLogin: 'login_v2',
+      userSecretKey: 'e0fb9ed569d1b820d85d54274cba3be8801d7f99f7edf29b6ae7b3dfc1dffc54',
+      betHistory: [],
+      lastBetIssueId: null
+    },
+    {
+      userId: 804804161,
+      userLogin: 'login_v2',
+      userSecretKey: '9d7f44620f31badac67536dfd694cb6420628e2951b7a69146f66324c98fbf6d',
+      betHistory: [],
+      lastBetIssueId: null
+    }
+  ],
   betAmount: null,
   shouldReconnect: true,
   maxRetries: 5,
@@ -22,20 +57,11 @@ const config = {
     1: 'Utilitas', 2: 'Rapat', 3: 'Direktur', 4: 'Diskusi',
     5: 'Pemantauan', 6: 'Kerja', 7: 'Keuangan', 8: 'HRD'
   },
-  betHistory: [],
   killHistory: [],
   ws: null,
   lastActivity: Date.now(),
   currentCountdown: 0,
-  currentIssueId: null,
-  lastBetIssueId: null
-};
-
-const authHeaders = {
-  'user-id': config.userId,
-  'user-login': config.userLogin,
-  'user-secret-key': config.userSecretKey,
-  'content-type': 'application/json'
+  currentIssueId: null
 };
 
 async function main() {
@@ -99,11 +125,12 @@ async function connectAndListen() {
 }
 
 async function authenticate() {
+  // Authenticate only the primary account for WebSocket connection
   const authData = {
     msg_type: "handle_enter_game",
     asset_type: "BUILD",
-    user_id: config.userId,
-    user_secret_key: config.userSecretKey
+    user_id: config.primaryAccount.userId,
+    user_secret_key: config.primaryAccount.userSecretKey
   };
   config.ws.send(JSON.stringify(authData));
 }
@@ -152,8 +179,7 @@ function processRoomData(data) {
     const rooms = mapRoomData(data.rooms);
     
     if (shouldPlaceBet()) {
-      executeBettingStrategy(rooms);
-      config.lastBetIssueId = config.currentIssueId;
+      executeBettingStrategyForAllAccounts(rooms);
     }
     
     updateDashboard(rooms);
@@ -161,25 +187,46 @@ function processRoomData(data) {
 }
 
 function shouldPlaceBet() {
-  return (
-    config.currentCountdown === 3 && 
-    config.currentIssueId !== config.lastBetIssueId
-  );
+  return config.currentCountdown === 10; // We'll check individual accounts in the execution
 }
 
-async function executeBettingStrategy(rooms) {
+async function executeBettingStrategyForAllAccounts(rooms) {
   const filteredRooms = filterActiveRooms(rooms);
   const sortedRooms = sortRoomsByRatio(filteredRooms);
   
   if (sortedRooms.length === 0) return;
 
+  // Get the target room with the highest ratio
   const targetRoom = sortedRooms[0];
-  try {
-    await enterRoom(targetRoom.id);
-    await placeBet(targetRoom.id);
-    logBetResult(targetRoom, true);
-  } catch (error) {
-    logBetResult(targetRoom, false, error.message);
+
+  // Execute bets for all accounts
+  for (const account of config.accounts) {
+    // Skip if this account already bet on this issue
+    if (account.lastBetIssueId === config.currentIssueId) {
+      continue;
+    }
+
+    try {
+      // Create headers for this specific account
+      const authHeaders = {
+        'user-id': account.userId,
+        'user-login': account.userLogin || 'login_v2',
+        'user-secret-key': account.userSecretKey,
+        'content-type': 'application/json'
+      };
+
+      await enterRoom(targetRoom.id, account.userId, authHeaders);
+      await placeBet(targetRoom.id, account.userId, authHeaders);
+      
+      // Log successful bet
+      logBetResult(account, targetRoom, true);
+      
+      // Update the last bet issue ID for this account
+      account.lastBetIssueId = config.currentIssueId;
+    } catch (error) {
+      // Log failed bet
+      logBetResult(account, targetRoom, false, error.message);
+    }
   }
 }
 
@@ -199,17 +246,17 @@ function sortRoomsByRatio(rooms) {
   return [...rooms].sort((a, b) => b.ratio - a.ratio);
 }
 
-async function enterRoom(roomId) {
+async function enterRoom(roomId, userId, headers) {
   try {
     await axios.post(
       'https://api.escapemaster.net/escape_game/enter_room',
       {
         asset_type: "BUILD",
-        user_id: config.userId,
+        user_id: userId,
         room_id: roomId
       },
       {
-        headers: authHeaders,
+        headers: headers,
         timeout: config.apiTimeout
       }
     );
@@ -218,18 +265,18 @@ async function enterRoom(roomId) {
   }
 }
 
-async function placeBet(roomId) {
+async function placeBet(roomId, userId, headers) {
   try {
     const response = await axios.post(
       'https://api.escapemaster.net/escape_game/bet',
       {
         asset_type: "BUILD",
-        user_id: config.userId,
+        user_id: userId,
         bet_amount: config.betAmount,
         room_id: roomId
       },
       {
-        headers: authHeaders,
+        headers: headers,
         timeout: config.apiTimeout
       }
     );
@@ -247,12 +294,13 @@ function updateDashboard(rooms) {
   showHeader();
   showRoomTable(rooms);
   showDestructionHistory();
-  showBetHistory();
+  showAllAccountsBetHistory();
 }
 
 function showHeader() {
-  console.log('=== LIVE DASHBOARD ==='.cyan);
-  console.log(`🕒 Countdown: ${config.currentCountdown}s | 💰 Taruhan: ${config.betAmount}\n`);
+  console.log('=== LIVE DASHBOARD (MULTI-ACCOUNT) ==='.cyan);
+  console.log(`🕒 Countdown: ${config.currentCountdown}s | 💰 Taruhan: ${config.betAmount}`);
+  console.log(`👤 Jumlah Akun: ${config.accounts.length}\n`);
 }
 
 function showRoomTable(rooms) {
@@ -271,7 +319,7 @@ function formatRoomForTable(room) {
 }
 
 function showDestructionHistory() {
-  console.log('\n=== 5 PENGHANCURAN TERAKHIR ==='.red);
+  console.log('\n=== 5 RUANGAN TERAKHIR DIBUNUH ==='.red);
   console.table(config.killHistory.slice(0, 5).map(formatDestructionEntry));
 }
 
@@ -284,9 +332,19 @@ function formatDestructionEntry(entry) {
   };
 }
 
-function showBetHistory() {
-  console.log('\n=== 5 TARUHAN TERAKHIR ==='.green);
-  console.table(config.betHistory.slice(0, 5).map(formatBetEntry));
+function showAllAccountsBetHistory() {
+  console.log('\n=== RIWAYAT TARUHAN SEMUA AKUN ==='.green);
+  
+  for (let i = 0; i < config.accounts.length; i++) {
+    const account = config.accounts[i];
+    console.log(`\n👤 AKUN #${i+1} (${account.userId})`.yellow);
+    
+    if (account.betHistory.length > 0) {
+      console.table(account.betHistory.slice(0, 3).map(formatBetEntry));
+    } else {
+      console.log('Belum ada riwayat taruhan'.gray);
+    }
+  }
 }
 
 function formatBetEntry(entry) {
@@ -299,7 +357,7 @@ function formatBetEntry(entry) {
   };
 }
 
-function logBetResult(room, isSuccess, errorMessage = '') {
+function logBetResult(account, room, isSuccess, errorMessage = '') {
   const entry = {
     waktu: new Date().toLocaleTimeString(),
     ruangan: room.name,
@@ -308,8 +366,8 @@ function logBetResult(room, isSuccess, errorMessage = '') {
     rasio: room.ratio.toFixed(2)
   };
 
-  config.betHistory.unshift(entry);
-  if (config.betHistory.length > 5) config.betHistory.pop();
+  account.betHistory.unshift(entry);
+  if (account.betHistory.length > 5) account.betHistory.pop();
 }
 
 function handleConnectionClose(reject) {
